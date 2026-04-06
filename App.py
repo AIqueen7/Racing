@@ -133,7 +133,26 @@ class PPOAgent:
         self.gamma = 0.99
 
     def select_action(self, state, explore=True):
-        state = torch.tensor(state, dtype=torch.float32)
+        if state is None:
+            return np.array([0.0, 0.0], dtype=np.float32)
+    
+        state = np.array(state, dtype=np.float32)
+    
+        # FIX: ensure correct shape
+        if state.ndim == 1:
+            state = state.reshape(1, -1)
+    
+        state_tensor = torch.tensor(state, dtype=torch.float32)
+    
+        action, _ = self.model(state_tensor)
+    
+        action = action.detach().numpy()[0]  # FIX: remove batch dim
+    
+        if explore:
+            noise = np.random.normal(0, 0.2, size=action.shape)
+            action = action + noise
+    
+        return np.clip(action, -1, 1)
         action, _ = self.model(state)
 
         action = action.detach().numpy()
