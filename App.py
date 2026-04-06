@@ -1,4 +1,4 @@
-# path: optimized_digital_twin.py
+# path: optimized_digital_twin_v2.py
 
 import streamlit as st
 import numpy as np
@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import os
 
 # =====================================================
-# 1. TRACK + PHYSICS
+# TRACK + PHYSICS
 # =====================================================
 
 class Track:
@@ -31,7 +31,7 @@ def max_corner_speed(radius, mu=1.2):
 
 
 # =====================================================
-# 2. ENVIRONMENT
+# ENVIRONMENT
 # =====================================================
 
 class AdvancedRacingEnv:
@@ -40,7 +40,7 @@ class AdvancedRacingEnv:
         self.reset()
 
     def reset(self):
-        self.speed = 0.0
+        self.speed = 5.0  # FIX: avoid dead start
         self.position = 0.0
         self.segment_idx = 0
         self.time = 0.0
@@ -59,7 +59,11 @@ class AdvancedRacingEnv:
         ], dtype=np.float32)
 
     def step(self, action):
-        throttle, brake = action
+        throttle_raw, brake_raw = action
+
+        # FIX: proper control scaling
+        throttle = (throttle_raw + 1) / 2  # [-1,1] → [0,1]
+        brake = max(0, brake_raw)
 
         accel = throttle * 6 - brake * 10 - 0.02 * self.speed**2
         self.speed = max(0, self.speed + accel * 0.1)
@@ -85,17 +89,18 @@ class AdvancedRacingEnv:
 
         done = self.segment_idx >= len(self.track.segments)
 
-        # early termination (bad run)
+        # FIX: early termination
         if self.speed < 1 and self.time > 5:
             done = True
 
-        reward = -0.1 - grip_penalty * 0.01
+        # FIX: proper reward
+        reward = self.speed * 0.1 - grip_penalty * 0.01
 
         return self._get_state(), reward, done, {}
 
 
 # =====================================================
-# 3. RL MODEL
+# RL MODEL
 # =====================================================
 
 class ActorCritic(nn.Module):
@@ -127,10 +132,18 @@ class PPOAgent:
         self.optimizer = optim.Adam(self.model.parameters(), lr=3e-4)
         self.gamma = 0.99
 
-    def select_action(self, state):
+    def select_action(self, state, explore=True):
         state = torch.tensor(state, dtype=torch.float32)
         action, _ = self.model(state)
-        return action.detach().numpy()
+
+        action = action.detach().numpy()
+
+        # FIX: exploration
+        if explore:
+            noise = np.random.normal(0, 0.2, size=action.shape)
+            action = action + noise
+
+        return np.clip(action, -1, 1)
 
     def train(self, trajectories):
         states = torch.tensor([t[0] for t in trajectories], dtype=torch.float32)
@@ -161,7 +174,7 @@ class PPOAgent:
 
 
 # =====================================================
-# 4. CACHE MODEL
+# CACHE MODEL
 # =====================================================
 
 @st.cache_resource
@@ -173,33 +186,32 @@ def load_agent():
 
 
 # =====================================================
-# 5. STREAMLIT UI
+# UI
 # =====================================================
 
 st.set_page_config(layout="wide")
-st.title("🏁 AI Racing Digital Twin (Optimized RL)")
+st.title("🏁 AI Racing Digital Twin (RL Fixed)")
 
 agent = load_agent()
 
-# persist agent
 if "agent" not in st.session_state:
     st.session_state.agent = agent
 
 agent = st.session_state.agent
 
 # =====================================================
-# 6. TRAIN BUTTON (CONTROLLED)
+# TRAIN BUTTON
 # =====================================================
 
-if st.button("Train RL Agent (Fast Mode)"):
+if st.button("Train RL Agent"):
     env = AdvancedRacingEnv()
 
-    for episode in range(5):  # reduced episodes
+    for episode in range(5):
         state = env.reset()
         traj = []
 
-        for _ in range(50):  # reduced steps
-            action = agent.select_action(state)
+        for _ in range(50):
+            action = agent.select_action(state, explore=True)
             next_state, reward, done, _ = env.step(action)
 
             traj.append((state, action, reward))
@@ -211,10 +223,10 @@ if st.button("Train RL Agent (Fast Mode)"):
         agent.train(traj)
 
     torch.save(agent.model.state_dict(), "ppo_model.pth")
-    st.success("Training complete & model saved")
+    st.success("Training complete")
 
 # =====================================================
-# 7. INFERENCE (INSTANT)
+# INFERENCE (NO EXPLORATION)
 # =====================================================
 
 env = AdvancedRacingEnv()
@@ -222,7 +234,7 @@ state = env.reset()
 
 trajectory = []
 for _ in range(100):
-    action = agent.select_action(state)
+    action = agent.select_action(state, explore=False)
     next_state, reward, done, _ = env.step(action)
 
     trajectory.append((state, action))
@@ -232,20 +244,25 @@ for _ in range(100):
         break
 
 # =====================================================
-# 8. VISUALIZATION
+# VISUALIZATION
 # =====================================================
 
 speeds = [s[0][0] for s in trajectory]
-actions = [a[1] for a in trajectory]
+throttle_vals = [(a[1][0] + 1)/2 for a in trajectory]
+brake_vals = [max(0, a[1][1]) for a in trajectory]
 
 fig, ax = plt.subplots()
 ax.plot(speeds, label="Speed")
-ax.set_title("Speed Profile")
+ax.plot(throttle_vals, label="Throttle")
+ax.plot(brake_vals, label="Brake")
 ax.legend()
 st.pyplot(fig)
 
 st.subheader("Final Control Output")
 st.write({
-    "Throttle": float(actions[-1][0]),
-    "Brake": float(actions[-1][1])
+    "Throttle": float(throttle_vals[-1]),
+    "Brake": float(brake_vals[-1])
 })
+
+st.subheader("Debug Actions (first 10)")
+st.write(throttle_vals[:10])
