@@ -1,16 +1,18 @@
-# path: advanced_rl_env.py
+# path: optimized_digital_twin.py
 
+import streamlit as st
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import matplotlib.pyplot as plt
+import os
 
 # =====================================================
-# 1. TRACK MODEL
+# 1. TRACK + PHYSICS
 # =====================================================
 
 class Track:
-    """Simple track: straights + corners"""
     def __init__(self):
         self.segments = [
             {"type": "straight", "length": 200},
@@ -24,23 +26,12 @@ class Track:
         return self.segments[idx % len(self.segments)]
 
 
-# =====================================================
-# 2. PACEJKA-LITE MODEL
-# =====================================================
-
-def pacejka_lite(slip_angle, mu=1.2):
-    """Simplified lateral force curve"""
-    B, C, D = 10, 1.9, mu
-    return D * np.sin(C * np.arctan(B * slip_angle))
-
-
 def max_corner_speed(radius, mu=1.2):
-    g = 9.81
-    return np.sqrt(mu * g * radius)
+    return np.sqrt(mu * 9.81 * radius)
 
 
 # =====================================================
-# 3. ADVANCED ENVIRONMENT
+# 2. ENVIRONMENT
 # =====================================================
 
 class AdvancedRacingEnv:
@@ -57,10 +48,7 @@ class AdvancedRacingEnv:
 
     def _get_state(self):
         seg = self.track.get_segment(self.segment_idx)
-
-        curvature = 0.0
-        if seg["type"] == "corner":
-            curvature = 1.0 / seg["radius"]
+        curvature = 0.0 if seg["type"] == "straight" else 1.0 / seg["radius"]
 
         return np.array([
             self.speed,
@@ -73,28 +61,21 @@ class AdvancedRacingEnv:
     def step(self, action):
         throttle, brake = action
 
-        seg = self.track.get_segment(self.segment_idx)
-
-        # longitudinal dynamics
         accel = throttle * 6 - brake * 10 - 0.02 * self.speed**2
         self.speed = max(0, self.speed + accel * 0.1)
 
-        # corner grip constraint
+        seg = self.track.get_segment(self.segment_idx)
+
+        grip_penalty = 0.0
         if seg["type"] == "corner":
             vmax = max_corner_speed(seg["radius"])
             if self.speed > vmax:
                 grip_penalty = (self.speed - vmax)**2
                 self.speed *= 0.9
-            else:
-                grip_penalty = 0.0
-        else:
-            grip_penalty = 0.0
 
-        # move along track
         self.position += self.speed * 0.1
         self.time += 0.1
 
-        # segment switching
         if seg["type"] == "straight" and self.position > seg["length"]:
             self.position = 0
             self.segment_idx += 1
@@ -104,14 +85,17 @@ class AdvancedRacingEnv:
 
         done = self.segment_idx >= len(self.track.segments)
 
-        # reward = negative lap time + penalties
+        # early termination (bad run)
+        if self.speed < 1 and self.time > 5:
+            done = True
+
         reward = -0.1 - grip_penalty * 0.01
 
         return self._get_state(), reward, done, {}
 
 
 # =====================================================
-# 4. PPO AGENT
+# 3. RL MODEL
 # =====================================================
 
 class ActorCritic(nn.Module):
@@ -177,18 +161,44 @@ class PPOAgent:
 
 
 # =====================================================
-# 5. TRAINING LOOP (TEST)
+# 4. CACHE MODEL
 # =====================================================
 
-if __name__ == "__main__":
-    env = AdvancedRacingEnv()
+@st.cache_resource
+def load_agent():
     agent = PPOAgent()
+    if os.path.exists("ppo_model.pth"):
+        agent.model.load_state_dict(torch.load("ppo_model.pth"))
+    return agent
 
-    for episode in range(50):
+
+# =====================================================
+# 5. STREAMLIT UI
+# =====================================================
+
+st.set_page_config(layout="wide")
+st.title("🏁 AI Racing Digital Twin (Optimized RL)")
+
+agent = load_agent()
+
+# persist agent
+if "agent" not in st.session_state:
+    st.session_state.agent = agent
+
+agent = st.session_state.agent
+
+# =====================================================
+# 6. TRAIN BUTTON (CONTROLLED)
+# =====================================================
+
+if st.button("Train RL Agent (Fast Mode)"):
+    env = AdvancedRacingEnv()
+
+    for episode in range(5):  # reduced episodes
         state = env.reset()
         traj = []
 
-        while True:
+        for _ in range(50):  # reduced steps
             action = agent.select_action(state)
             next_state, reward, done, _ = env.step(action)
 
@@ -199,4 +209,43 @@ if __name__ == "__main__":
                 break
 
         agent.train(traj)
-        print(f"Episode {episode} complete")
+
+    torch.save(agent.model.state_dict(), "ppo_model.pth")
+    st.success("Training complete & model saved")
+
+# =====================================================
+# 7. INFERENCE (INSTANT)
+# =====================================================
+
+env = AdvancedRacingEnv()
+state = env.reset()
+
+trajectory = []
+for _ in range(100):
+    action = agent.select_action(state)
+    next_state, reward, done, _ = env.step(action)
+
+    trajectory.append((state, action))
+    state = next_state
+
+    if done:
+        break
+
+# =====================================================
+# 8. VISUALIZATION
+# =====================================================
+
+speeds = [s[0][0] for s in trajectory]
+actions = [a[1] for a in trajectory]
+
+fig, ax = plt.subplots()
+ax.plot(speeds, label="Speed")
+ax.set_title("Speed Profile")
+ax.legend()
+st.pyplot(fig)
+
+st.subheader("Final Control Output")
+st.write({
+    "Throttle": float(actions[-1][0]),
+    "Brake": float(actions[-1][1])
+})
